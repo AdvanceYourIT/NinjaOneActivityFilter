@@ -2,6 +2,9 @@
 
 Standalone PowerShell/WPF GUI to query NinjaOne activities, filter by date/type and optional device filter, and export/copy results.
 
+<img width="1206" height="753" alt="afbeelding" src="https://github.com/user-attachments/assets/d4240ce5-737a-4f9d-9c4b-199be1bb626f" />
+
+
 ## Use case
 If you manage a large environment (for example **18,196 devices**) and NinjaOne CSV export/filtering is currently practical only at day-level granularity, this GUI helps you narrow activity data down to **minute-level windows**.
 
