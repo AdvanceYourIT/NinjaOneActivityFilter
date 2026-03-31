@@ -67,6 +67,12 @@ pwsh -File .\ScriptKit\Example-Get-Organizations.ps1 -TenantDomain eu.ninjarmm.c
 pwsh -File .\ScriptKit\Example-Get-Devices.ps1 -TenantDomain eu.ninjarmm.com -PageSize 100
 ```
 
+### Organization-scoped activity pattern (same approach as GUI)
+
+For org-scoped activity queries, first retrieve devices and match by organization fields (`organizationId`, `orgId`, or `organization.id`), then query `/v2/device/{id}/activities` for each matched device.
+
+This avoids relying on tenant-specific filter syntax and mirrors the behavior used in the GUI scripts.
+
 ---
 
 ## Create your own script

@@ -111,9 +111,12 @@ powershell -ExecutionPolicy Bypass -File .\NinjaOne-ActivityFilter-GUI-WebAuth.p
 2. Click **Login**.
 3. First login: complete browser sign-in/consent.
 4. Next logins: GUI first tries the local token cache (`$NinjaTokenCachePath`) and only opens the browser again when cache/refresh token is invalid or revoked.
-5. In GUI, set date/type/device filters.
-6. Click **Search**.
-7. Optional: **Export CSV** or **Copy Rows**.
+5. In GUI, set date/type filters.
+6. Optional: choose an organization in **Organization (optional)**.
+7. Optional: set a Device ID/Hostname filter (explicit device filter takes precedence over organization selection).
+8. Click **Search** (button is shown in the right panel of the filter card).
+9. If only organization is selected, the GUI resolves organization devices from `/v2/devices` (paged) and queries activities per matched device.
+10. Optional: **Export CSV** or **Copy Rows**.
 
 ## OAuth flow (technical summary)
 

@@ -18,6 +18,9 @@ $script:DataTable        = New-Object System.Data.DataTable
 $script:DeviceNameCache  = @{}
 $script:HostnameDeviceCache = @{}
 $script:statusFilters   = @()
+$script:Organizations    = @()
+$script:ClientId         = ''
+$script:ClientSecret     = ''
 $script:MaxPages         = 50
 $script:DefaultPageSize  = 1000
 #endregion
@@ -509,6 +512,7 @@ function Get-Activities {
         [string]$After,
         [string]$Before,
         [string]$DeviceId,
+        [AllowNull()][string]$OrganizationId,
         [string]$ClientID,
         [string]$ClientSecret
     )
@@ -519,6 +523,13 @@ function Get-Activities {
     $apiAfter = Convert-DateFilterToApiDate -Value $After
     $apiBefore = Convert-DateFilterToApiDate -Value $Before -IsBefore
     $baseQuery = @{ pageSize = [string]$script:DefaultPageSize; after = $apiAfter; before = $apiBefore }
+    $organizationFilter = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$OrganizationId)) {
+        # /v2/activities does not expose direct organizationId parameter in this API spec revision.
+        # Use device filter (df) to scope by organization.
+        $organizationFilter = "organizationId = $([string]$OrganizationId)"
+        Write-ConsoleLog -Level DEBUG -Message "Organization filter prepared via df: $organizationFilter"
+    }
 
     $endpoints = @()
     if ($DeviceId -match '^\d+$') {
@@ -531,10 +542,32 @@ function Get-Activities {
             }
         }
     }
+    elseif (-not [string]::IsNullOrWhiteSpace([string]$OrganizationId)) {
+        $organizationDeviceIds = Get-OrganizationDeviceIds -OrganizationId $OrganizationId -ClientID $ClientID -ClientSecret $ClientSecret
+        if (@($organizationDeviceIds).Count -eq 0) {
+            Write-ConsoleLog -Level WARN -Message "No devices found for organizationId=$OrganizationId."
+            return @()
+        }
+
+        Write-ConsoleLog -Level INFO -Message "OrganizationId=$OrganizationId resolved to $(@($organizationDeviceIds).Count) device(s). Querying device activity endpoints."
+        foreach ($deviceIdValue in @($organizationDeviceIds)) {
+            foreach ($type in $Types) {
+                foreach ($status in $statusFilters) {
+                    $q = $baseQuery.Clone()
+                    $q.activityType = $type
+                    if ($status) { $q.status = $status }
+                    $endpoints += [pscustomobject]@{ Endpoint = "/v2/device/$deviceIdValue/activities"; Query = $q }
+                }
+            }
+        }
+    }
     else {
         foreach ($type in $Types) {
             $q = $baseQuery.Clone()
             $q.type = $type
+            if (-not [string]::IsNullOrWhiteSpace([string]$organizationFilter)) {
+                $q.df = $organizationFilter
+            }
             $endpoints += [pscustomobject]@{ Endpoint = '/v2/activities'; Query = $q }
         }
     }
@@ -578,6 +611,160 @@ function Get-Activities {
 
     $dateFilteredActivities = Apply-DateFilterToActivities -Activities $uniqueActivities -After $After -Before $Before
     return @($dateFilteredActivities)
+}
+
+function Get-OrganizationDeviceIds {
+    param(
+        [Parameter(Mandatory = $true)][string]$OrganizationId,
+        [Parameter(Mandatory = $true)][string]$ClientID,
+        [Parameter(Mandatory = $true)][string]$ClientSecret
+    )
+
+    $allDeviceIds = @()
+    $olderThan = $null
+    $pageSize = 1000
+    $pageCount = 0
+
+    do {
+        $query = @{ pageSize = [string]$pageSize }
+        if (-not [string]::IsNullOrWhiteSpace([string]$olderThan)) {
+            $query.olderThan = [string]$olderThan
+        }
+
+        $resp = Invoke-NinjaApiGet -Endpoint '/v2/devices' -Query $query -ClientID $ClientID -ClientSecret $ClientSecret
+        $devices = @()
+        if ($resp -is [System.Array]) {
+            $devices = @($resp)
+        }
+        else {
+            foreach ($prop in @('devices','results','items','data')) {
+                $candidate = Get-ObjectPropertyValue -InputObject $resp -PropertyName $prop
+                if ($candidate) {
+                    $devices = @($candidate)
+                    break
+                }
+            }
+        }
+
+        if (@($devices).Count -eq 0) { break }
+
+        foreach ($device in @($devices)) {
+            $id = [string](Get-ObjectPropertyValue -InputObject $device -PropertyName 'id')
+            if ([string]::IsNullOrWhiteSpace($id)) { continue }
+
+            $deviceOrg = [string](Get-ObjectPropertyValue -InputObject $device -PropertyName 'organizationId')
+            if ([string]::IsNullOrWhiteSpace($deviceOrg)) {
+                $deviceOrg = [string](Get-ObjectPropertyValue -InputObject $device -PropertyName 'orgId')
+            }
+            if ([string]::IsNullOrWhiteSpace($deviceOrg)) {
+                $orgObj = Get-ObjectPropertyValue -InputObject $device -PropertyName 'organization'
+                if ($orgObj) {
+                    $deviceOrg = [string](Get-ObjectPropertyValue -InputObject $orgObj -PropertyName 'id')
+                }
+            }
+
+            if ($deviceOrg -eq [string]$OrganizationId) {
+                $allDeviceIds += $id
+            }
+        }
+
+        $pageCount++
+        if (@($devices).Count -ge $pageSize) {
+            $olderThan = [string](($devices | Measure-Object -Property id -Minimum).Minimum)
+        }
+        else {
+            $olderThan = $null
+        }
+    } while (-not [string]::IsNullOrWhiteSpace([string]$olderThan) -and $pageCount -lt $script:MaxPages)
+
+    return @($allDeviceIds | Sort-Object -Unique)
+}
+
+function Get-Organizations {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClientID,
+        [Parameter(Mandatory = $true)][string]$ClientSecret
+    )
+
+    $allOrganizations = @()
+    $after = $null
+    $pageSize = 200
+
+    do {
+        $query = @{ pageSize = [string]$pageSize }
+        if (-not [string]::IsNullOrWhiteSpace([string]$after)) {
+            $query.after = [string]$after
+        }
+
+        $response = Invoke-NinjaApiGet -Endpoint '/v2/organizations' -Query $query -ClientID $ClientID -ClientSecret $ClientSecret
+        $pageItems = @()
+
+        if ($response -is [System.Array]) {
+            $pageItems = @($response)
+        }
+        elseif ($response) {
+            foreach ($candidate in @('organizations','items','results','data')) {
+                $candidateItems = Get-ObjectPropertyValue -InputObject $response -PropertyName $candidate
+                if ($candidateItems) {
+                    $pageItems = @($candidateItems)
+                    break
+                }
+            }
+
+            if ($pageItems.Count -eq 0) {
+                $pageItems = @($response)
+            }
+        }
+
+        if ($pageItems.Count -eq 0) { break }
+
+        foreach ($organization in $pageItems) {
+            $id = Get-ObjectPropertyValue -InputObject $organization -PropertyName 'id'
+            $name = Get-ObjectPropertyValue -InputObject $organization -PropertyName 'name'
+            if ($null -ne $id -and -not [string]::IsNullOrWhiteSpace([string]$name)) {
+                $allOrganizations += [pscustomobject]@{
+                    id   = [string]$id
+                    name = [string]$name
+                }
+            }
+        }
+
+        $nextAfter = $null
+        foreach ($candidate in @('after','nextAfter','nextCursor','cursor')) {
+            $value = Get-ObjectPropertyValue -InputObject $response -PropertyName $candidate
+            if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+                $nextAfter = [string]$value
+                break
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($nextAfter)) {
+            $last = $pageItems[-1]
+            if ($last) {
+                $lastId = Get-ObjectPropertyValue -InputObject $last -PropertyName 'id'
+                if ($null -ne $lastId -and $pageItems.Count -ge $pageSize) {
+                    $nextAfter = [string]$lastId
+                }
+            }
+        }
+
+        $after = $nextAfter
+    } while (-not [string]::IsNullOrWhiteSpace([string]$after))
+
+    $script:Organizations = @($allOrganizations | Sort-Object -Property name, id -Unique)
+    return @(
+        [pscustomobject]@{
+            DisplayName = 'All organizations'
+            Id          = $null
+        }
+    ) + @(
+        $script:Organizations | ForEach-Object {
+            [pscustomobject]@{
+                DisplayName = $_.name
+                Id          = $_.id
+            }
+        }
+    )
 }
 #endregion
 
@@ -692,6 +879,8 @@ Add-Type -AssemblyName System.Windows.Forms
                     <ColumnDefinition Width="70"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="220"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="220"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
@@ -703,9 +892,10 @@ Add-Type -AssemblyName System.Windows.Forms
                 <TextBox Grid.Row="0" Grid.Column="5" x:Name="txtBeforeTime" Height="24" Text="00:00" ToolTip="HH:mm" Margin="0,0,12,8"/>
                 <TextBlock Grid.Row="0" Grid.Column="6" Text="Device ID / Hostname (optional):" VerticalAlignment="Center" Margin="0,0,8,8"/>
                 <TextBox Grid.Row="0" Grid.Column="7" x:Name="txtDeviceId" Height="24" Margin="0,0,12,8"/>
-                <Button Grid.Row="0" Grid.Column="8" x:Name="btnSearch" Content="Search" Height="28" Width="110" HorizontalAlignment="Left" IsEnabled="False"/>
+                <TextBlock Grid.Row="0" Grid.Column="8" Text="Organization (optional):" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                <ComboBox Grid.Row="0" Grid.Column="9" x:Name="cmbOrganization" Height="24" Margin="0,0,12,8"/>
 
-                <Grid Grid.Row="1" Grid.ColumnSpan="9" Margin="0,8,0,0">
+                <Grid Grid.Row="1" Grid.ColumnSpan="11" Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="2*"/>
                         <ColumnDefinition Width="260"/>
@@ -721,6 +911,7 @@ Add-Type -AssemblyName System.Windows.Forms
                     </StackPanel>
 
                     <StackPanel Grid.Column="1">
+                        <Button x:Name="btnSearch" Content="Search" Height="28" Width="110" HorizontalAlignment="Left" IsEnabled="False" Margin="0,0,0,8"/>
                         <TextBlock x:Name="lblCount" Text="No results" Foreground="{StaticResource TextMuted}" Margin="0,20,0,6"/>
                         <TextBlock x:Name="lblStatus" Text="Ready. Connect to NinjaOne to begin." Foreground="{StaticResource TextPrimary}" TextWrapping="Wrap"/>
                     </StackPanel>
@@ -776,6 +967,7 @@ $dpBefore      = $window.FindName('dpBefore')
 $txtAfterTime  = $window.FindName('txtAfterTime')
 $txtBeforeTime = $window.FindName('txtBeforeTime')
 $txtDeviceId   = $window.FindName('txtDeviceId')
+$cmbOrganization = $window.FindName('cmbOrganization')
 $btnSearch     = $window.FindName('btnSearch')
 $lstTypes      = $window.FindName('lstTypes')
 $btnSelectAllTypes = $window.FindName('btnSelectAllTypes')
@@ -799,6 +991,10 @@ $txtDomain.ToolTip = "Supported domains: $($supportedDomains -join ', ')"
 $activityTypes = @('ACTIONSET','ACTION','CONDITION','CONDITION_ACTIONSET','CONDITION_ACTION','ANTIVIRUS','PATCH_MANAGEMENT','TEAMVIEWER','MONITOR','SYSTEM','COMMENT','SHADOWPROTECT','IMAGEMANAGER','HELP_REQUEST','SOFTWARE_PATCH_MANAGEMENT','SPLASHTOP','CLOUDBERRY','CLOUDBERRY_BACKUP','SCHEDULED_TASK','RDP','SCRIPTING','SECURITY','REMOTE_TOOLS','VIRTUALIZATION','PSA','MDM','NINJA_REMOTE','NINJA_QUICK_CONNECT','NINJA_NETWORK_DISCOVERY','NINJA_BACKUP','NINJA_TICKETING','KNOWLEDGE_BASE','RELATED_ITEM','CLIENT_CHECKLIST','CHECKLIST_TEMPLATE','DOCUMENTATION','MICROSOFT_INTUNE','DYNAMIC_POLICY')
 $lstTypes.ItemsSource = $activityTypes
 $lstTypes.SelectedItems.Add('SCRIPTING') | Out-Null
+$cmbOrganization.ItemsSource = @([pscustomobject]@{ DisplayName = 'All organizations'; Id = $null })
+$cmbOrganization.DisplayMemberPath = 'DisplayName'
+$cmbOrganization.SelectedValuePath = 'Id'
+$cmbOrganization.SelectedIndex = 0
 
 foreach ($colName in @('id','activityTime','deviceId','hostname','activityType','statusCode','severity','details')) {
     [void]$script:DataTable.Columns.Add($colName)
@@ -824,14 +1020,39 @@ $btnConnect.Add_Click({
         $script:TokenInfo = Get-NinjaToken -BaseUrl $script:BaseUrl -ClientID $clientId -ClientSecret $secret
         $script:DeviceNameCache = @{}
         $script:HostnameDeviceCache = @{}
+        $script:Organizations = @()
+        $script:ClientId = $clientId
+        $script:ClientSecret = $secret
+
+        try {
+            $organizationOptions = Get-Organizations -ClientID $clientId -ClientSecret $secret
+            $cmbOrganization.ItemsSource = $organizationOptions
+            $cmbOrganization.DisplayMemberPath = 'DisplayName'
+            $cmbOrganization.SelectedValuePath = 'Id'
+            $cmbOrganization.SelectedIndex = 0
+            Write-ConsoleLog -Level INFO -Message "Loaded $($script:Organizations.Count) organizations."
+        }
+        catch {
+            $script:Organizations = @()
+            $cmbOrganization.ItemsSource = @([pscustomobject]@{ DisplayName = 'All organizations'; Id = $null })
+            $cmbOrganization.DisplayMemberPath = 'DisplayName'
+            $cmbOrganization.SelectedValuePath = 'Id'
+            $cmbOrganization.SelectedIndex = 0
+            $lblStatus.Text = "Connected to $($script:BaseUrl) — warning: unable to load organizations ($($_.Exception.Message))."
+            Write-ConsoleLog -Level WARN -Message "Connected, but organization load failed: $($_.Exception.Message)"
+        }
 
         $lblConnStatus.Text = 'Connected'
         $lblConnStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
         $btnSearch.IsEnabled = $true
-        $lblStatus.Text = "Connected to $($script:BaseUrl) — set filters and click Search."
+        if ($lblStatus.Text -notmatch 'unable to load organizations') {
+            $lblStatus.Text = "Connected to $($script:BaseUrl) — set filters and click Search."
+        }
         Write-ConsoleLog -Level INFO -Message 'Connection successful.'
     }
     catch {
+        $script:ClientId = ''
+        $script:ClientSecret = ''
         $lblConnStatus.Text = 'Failed'
         $lblConnStatus.Foreground = [System.Windows.Media.Brushes]::Tomato
         $btnSearch.IsEnabled = $false
@@ -869,12 +1090,15 @@ $btnSearch.Add_Click({
         return
     }
     $deviceFilter = $txtDeviceId.Text.Trim()
-    $clientId = $txtClientId.Password.Trim()
-    $secret = $txtSecret.Password
+    $organizationId = [string]$cmbOrganization.SelectedValue
+    if ([string]::IsNullOrWhiteSpace($script:ClientId) -or [string]::IsNullOrWhiteSpace($script:ClientSecret)) {
+        [System.Windows.MessageBox]::Show('Credentials missing. Please reconnect first.', 'Not Connected', 'OK', 'Warning') | Out-Null
+        return
+    }
 
     $deviceId = $deviceFilter
     if (-not [string]::IsNullOrWhiteSpace($deviceFilter) -and $deviceFilter -notmatch '^\d+$') {
-        $deviceId = Resolve-DeviceIdByHostname -Hostname $deviceFilter -ClientID $clientId -ClientSecret $secret
+        $deviceId = Resolve-DeviceIdByHostname -Hostname $deviceFilter -ClientID $script:ClientId -ClientSecret $script:ClientSecret
         if ([string]::IsNullOrWhiteSpace($deviceId)) {
             [System.Windows.MessageBox]::Show("No device found for hostname '$deviceFilter'.", 'Device Not Found', 'OK', 'Warning') | Out-Null
             return
@@ -888,10 +1112,19 @@ $btnSearch.Add_Click({
     $lblStatus.Text = 'Querying NinjaOne API...'
     $lblCount.Text = 'Loading...'
 
-    Write-ConsoleLog -Level INFO -Message "Search started. After=$afterDate Before=$beforeDate DeviceFilter=$deviceFilter ResolvedDeviceId=$deviceId Types=$($selectedTypes -join ',')"
+    Write-ConsoleLog -Level INFO -Message "Search started. After=$afterDate Before=$beforeDate DeviceFilter=$deviceFilter ResolvedDeviceId=$deviceId OrganizationId=$organizationId Types=$($selectedTypes -join ',')"
+    if ([string]::IsNullOrWhiteSpace($organizationId)) {
+        Write-ConsoleLog -Level DEBUG -Message 'Organization filter: All organizations (none applied).'
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($deviceId)) {
+        Write-ConsoleLog -Level DEBUG -Message "Organization filter selected ($organizationId), but device-specific endpoint will be used when DeviceId is set."
+    }
+    else {
+        Write-ConsoleLog -Level INFO -Message "Organization filter active: $organizationId"
+    }
 
     try {
-        $results = Get-Activities -Types $selectedTypes -After $afterDate -Before $beforeDate -DeviceId $deviceId -ClientID $clientId -ClientSecret $secret
+        $results = Get-Activities -Types $selectedTypes -After $afterDate -Before $beforeDate -DeviceId $deviceId -OrganizationId $organizationId -ClientID $script:ClientId -ClientSecret $script:ClientSecret
         $script:AllResults = @($results)
         Write-ConsoleLog -Level DEBUG -Message "Date-filtered result count: $($script:AllResults.Count)"
 
@@ -901,7 +1134,7 @@ $btnSearch.Add_Click({
             $row['id'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'id')
             $row['activityTime'] = ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityTime')
             $row['deviceId'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'deviceId')
-            $row['hostname'] = Resolve-DeviceHostname -DeviceId $row['deviceId'] -ClientID $clientId -ClientSecret $secret
+            $row['hostname'] = Resolve-DeviceHostname -DeviceId $row['deviceId'] -ClientID $script:ClientId -ClientSecret $script:ClientSecret
             $row['activityType'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityType')
             $row['statusCode'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'statusCode')
             $row['severity'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'severity')
@@ -932,6 +1165,10 @@ $btnSearch.Add_Click({
 
 $btnExport.Add_Click({
     if (-not $script:AllResults -or $script:AllResults.Count -eq 0) { return }
+    if ([string]::IsNullOrWhiteSpace($script:ClientId) -or [string]::IsNullOrWhiteSpace($script:ClientSecret)) {
+        [System.Windows.MessageBox]::Show('Credentials missing. Please reconnect before exporting.', 'Reconnect Required', 'OK', 'Warning') | Out-Null
+        return
+    }
 
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
     $dlg.Filter = 'CSV Files (*.csv)|*.csv'
@@ -942,7 +1179,7 @@ $btnExport.Add_Click({
             $script:AllResults | Select-Object @{N='Activity ID';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'id') }},
                 @{N='Activity Time';E={ ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $_ -PropertyName 'activityTime') }},
                 @{N='Device ID';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'deviceId') }},
-                @{N='Hostname';E={ Resolve-DeviceHostname -DeviceId (Get-ObjectPropertyValue -InputObject $_ -PropertyName 'deviceId') -ClientID $clientId -ClientSecret $secret }},
+                @{N='Hostname';E={ Resolve-DeviceHostname -DeviceId (Get-ObjectPropertyValue -InputObject $_ -PropertyName 'deviceId') -ClientID $script:ClientId -ClientSecret $script:ClientSecret }},
                 @{N='Type';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'activityType') }},
                 @{N='Status';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'statusCode') }},
                 @{N='Severity';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'severity') }},

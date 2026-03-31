@@ -13,6 +13,7 @@ That makes it easier to investigate spikes, incidents, or audit trails without m
   - `After` / `Before` date
   - multiple Activity Types
   - optional Device ID **or** Hostname
+  - optional Organization
 - Result grid columns:
   - Activity ID
   - Activity Time
@@ -42,11 +43,15 @@ That makes it easier to investigate spikes, incidents, or audit trails without m
    - Secret
 4. Click **Connect**.
 5. Choose date range and one or more Activity Types.
-6. (Optional) Fill `Device ID / Hostname`.
-7. Click **Search**.
-8. Use **Export CSV** or **Copy Rows** if needed.
+6. (Optional) Select an `Organization`.
+7. (Optional) Fill `Device ID / Hostname`.
+   - If both are set, explicit Device ID/Hostname takes precedence.
+   - If only Organization is set, the script resolves organization devices from `/v2/devices` (paged) and queries activity per matching device.
+8. Click **Search**.
+9. Use **Export CSV** or **Copy Rows** if needed.
 
 ## Notes
 - Client ID and Secret are masked in the UI.
 - If hostname is used in the device filter, the script resolves it to a device ID before querying.
+- Organization filtering is applied by matching device organization fields (`organizationId` / `orgId` / `organization.id`) and querying device activities for the matched set.
 - Date boundaries are also enforced client-side on returned activity data.
