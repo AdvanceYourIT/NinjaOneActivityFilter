@@ -1,11 +1,14 @@
 # NinjaOne Activity Filter GUI
 
-Standalone PowerShell/WPF GUI to query NinjaOne activities, filter by date/type/device/organization, use per-column header filters in the result grid, and export/copy results.
+Standalone PowerShell/WPF GUI to query NinjaOne activities, filter by date/type/organization, use per-column header filters in the result grid, and export/copy results.
 
 ## Use case
 If you manage a large environment (for example **18,196 devices**) and NinjaOne CSV export/filtering is currently practical only at day-level granularity, this GUI helps you narrow activity data down to **minute-level windows**.
 
 That makes it easier to investigate spikes, incidents, or audit trails without manually sifting through thousands of same-day events.
+
+<img width="1204" height="751" alt="afbeelding" src="https://github.com/user-attachments/assets/bc898643-c129-4448-8440-431bb356c5ab" />
+(Screenshot is from the WebAuth version of the script)
 
 ## Features
 - OAuth connect to NinjaOne tenant
