@@ -107,17 +107,18 @@ powershell -ExecutionPolicy Bypass -File .\NinjaOne-ActivityFilter-GUI-WebAuth.p
 
 ### 6) GUI usage steps
 
+Column header filters are available directly in the results grid and apply client-side to the currently loaded rows.
+
 1. Choose the correct tenant domain in dropdown.
 2. Click **Login**.
 3. First login: complete browser sign-in/consent.
 4. Next logins: GUI first tries the local token cache (`$NinjaTokenCachePath`) and only opens the browser again when cache/refresh token is invalid or revoked.
 5. In GUI, set date/type filters.
 6. Optional: choose an organization in **Organization (optional)**.
-7. Optional: set a Device ID/Hostname filter (explicit device filter takes precedence over organization selection).
-8. Optional: set **Details keyword (optional)** to live-filter visible rows by text in the `Details` column.
-9. Click **Search**.
-10. If only organization is selected, the GUI resolves organization devices from `/v2/devices` (paged) and queries activities per matched device.
-11. Optional: **Export CSV** or **Copy Rows**.
+7. Optional: use the filter inputs in each result-grid column header to live-filter visible rows (Activity ID, Activity Time, Device ID, Hostname, Type, Status, Severity, Details).
+8. Click **Search**.
+9. If only organization is selected, the GUI resolves organization devices from `/v2/devices` (paged) and queries activities per matched device.
+10. Optional: **Export CSV** or **Copy Rows**.
 
 ## OAuth flow (technical summary)
 

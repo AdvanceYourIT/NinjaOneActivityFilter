@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 $script:TokenInfo        = $null
 $script:BaseUrl          = ''
 $script:AllResults       = @()
+$script:ProjectedRows    = @()
 $script:DataTable        = New-Object System.Data.DataTable
 $script:DeviceNameCache  = @{}
 $script:HostnameDeviceCache = @{}
@@ -23,6 +24,7 @@ $script:ClientId         = ''
 $script:ClientSecret     = ''
 $script:MaxPages         = 50
 $script:DefaultPageSize  = 1000
+$script:HeaderFilterTextBoxes = @{}
 #endregion
 
 #region --- Logging ---
@@ -464,48 +466,155 @@ function Get-DateTimeFilterString {
     return $parsed.ToString('yyyy-MM-dd HH:mm')
 }
 
-function Apply-DetailsKeywordFilter {
-    param([AllowNull()][string]$Keyword)
+function Normalize-FilterText {
+    param([AllowNull()][string]$Text)
 
-    $allResults = @(if ($null -eq $script:AllResults) { @() } else { $script:AllResults })
-    $needle = if ([string]::IsNullOrWhiteSpace($Keyword)) { '' } else { $Keyword.Trim().ToLowerInvariant() }
-    $visibleResults = if ([string]::IsNullOrWhiteSpace($needle)) {
-        $allResults
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    return $Text.Trim().ToLowerInvariant()
+}
+
+function Get-ActivityColumnValue {
+    param(
+        [Parameter(Mandatory = $true)]$Activity,
+        [Parameter(Mandatory = $true)][string]$ColumnName
+    )
+
+    switch ($ColumnName) {
+        'id' { return [string](Get-ObjectPropertyValue -InputObject $Activity -PropertyName 'id') }
+        'activityTime' { return ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $Activity -PropertyName 'activityTime') }
+        'deviceId' { return [string](Get-ObjectPropertyValue -InputObject $Activity -PropertyName 'deviceId') }
+        'hostname' {
+            $deviceId = [string](Get-ObjectPropertyValue -InputObject $Activity -PropertyName 'deviceId')
+            return Resolve-DeviceHostname -DeviceId $deviceId -ClientID $script:ClientId -ClientSecret $script:ClientSecret
+        }
+        'activityType' { return [string](Get-ObjectPropertyValue -InputObject $Activity -PropertyName 'activityType') }
+        'statusCode' { return [string](Get-ObjectPropertyValue -InputObject $Activity -PropertyName 'statusCode') }
+        'severity' { return [string](Get-ObjectPropertyValue -InputObject $Activity -PropertyName 'severity') }
+        'details' { return Get-ActivityDetails -Activity $Activity }
+        default { return '' }
     }
-    else {
-        foreach ($activity in $allResults) {
-            $details = Get-ActivityDetails -Activity $activity
-            if (-not [string]::IsNullOrWhiteSpace($details) -and $details.ToLowerInvariant().Contains($needle)) {
-                $activity
+}
+
+function Convert-ActivitiesToProjectedRows {
+    param([object[]]$Activities)
+
+    $projectedRows = @()
+    foreach ($activity in @(if ($null -eq $Activities) { @() } else { $Activities })) {
+        $deviceId = [string](Get-ObjectPropertyValue -InputObject $activity -PropertyName 'deviceId')
+        $projectedRows += [pscustomobject]@{
+            id           = [string](Get-ObjectPropertyValue -InputObject $activity -PropertyName 'id')
+            activityTime = ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $activity -PropertyName 'activityTime')
+            deviceId     = $deviceId
+            hostname     = Resolve-DeviceHostname -DeviceId $deviceId -ClientID $script:ClientId -ClientSecret $script:ClientSecret
+            activityType = [string](Get-ObjectPropertyValue -InputObject $activity -PropertyName 'activityType')
+            statusCode   = [string](Get-ObjectPropertyValue -InputObject $activity -PropertyName 'statusCode')
+            severity     = [string](Get-ObjectPropertyValue -InputObject $activity -PropertyName 'severity')
+            details      = Get-ActivityDetails -Activity $activity
+        }
+    }
+
+    return @($projectedRows)
+}
+
+function Get-ActiveColumnFilterMap {
+    $filterMap = @{}
+    foreach ($column in @('id','activityTime','deviceId','hostname','activityType','statusCode','severity','details')) {
+        $rawValues = @()
+        if ($script:HeaderFilterTextBoxes.ContainsKey($column)) {
+            $rawValues += $script:HeaderFilterTextBoxes[$column].Text
+        }
+
+        $activeValues = @($rawValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($activeValues.Count -gt 0) {
+            $filterMap[$column] = $activeValues
+        }
+    }
+
+    return $filterMap
+}
+
+function Apply-ColumnFilters {
+    param([hashtable]$FilterMap)
+
+    $allProjectedRows = @(if ($null -eq $script:ProjectedRows) { @() } else { $script:ProjectedRows })
+    $normalizedFilters = @{}
+    if ($FilterMap) {
+        foreach ($entry in $FilterMap.GetEnumerator()) {
+            $needles = @()
+            foreach ($value in @($entry.Value)) {
+                $normalized = Normalize-FilterText -Text ([string]$value)
+                if (-not [string]::IsNullOrWhiteSpace($normalized)) {
+                    $needles += $normalized
+                }
+            }
+
+            if ($needles.Count -gt 0) {
+                $normalizedFilters[[string]$entry.Key] = $needles
             }
         }
     }
 
+    $hasActiveFilters = ($normalizedFilters.Count -gt 0)
+    $visibleRows = foreach ($projectedRow in $allProjectedRows) {
+        $isMatch = $true
+        foreach ($entry in $normalizedFilters.GetEnumerator()) {
+            $columnValue = [string](Get-ObjectPropertyValue -InputObject $projectedRow -PropertyName ([string]$entry.Key))
+            $normalizedRowValue = Normalize-FilterText -Text ([string]$columnValue)
+            foreach ($needle in @($entry.Value)) {
+                if (-not $normalizedRowValue.Contains($needle)) {
+                    $isMatch = $false
+                    break
+                }
+            }
+
+            if (-not $isMatch) { break }
+        }
+
+        if ($isMatch) { $projectedRow }
+    }
+
     $script:DataTable.Rows.Clear()
-    foreach ($a in @($visibleResults)) {
+    foreach ($projectedRow in @($visibleRows)) {
         $row = $script:DataTable.NewRow()
-        $row['id'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'id')
-        $row['activityTime'] = ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityTime')
-        $row['deviceId'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'deviceId')
-        $row['hostname'] = Resolve-DeviceHostname -DeviceId $row['deviceId'] -ClientID $script:ClientId -ClientSecret $script:ClientSecret
-        $row['activityType'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityType')
-        $row['statusCode'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'statusCode')
-        $row['severity'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'severity')
-        $row['details'] = Get-ActivityDetails -Activity $a
+        $row['id'] = [string]$projectedRow.id
+        $row['activityTime'] = [string]$projectedRow.activityTime
+        $row['deviceId'] = [string]$projectedRow.deviceId
+        $row['hostname'] = [string]$projectedRow.hostname
+        $row['activityType'] = [string]$projectedRow.activityType
+        $row['statusCode'] = [string]$projectedRow.statusCode
+        $row['severity'] = [string]$projectedRow.severity
+        $row['details'] = [string]$projectedRow.details
         [void]$script:DataTable.Rows.Add($row)
     }
 
     $visibleCount = $script:DataTable.Rows.Count
-    $totalCount = $allResults.Count
-    if ([string]::IsNullOrWhiteSpace($needle)) {
+    $totalCount = $allProjectedRows.Count
+    if (-not $hasActiveFilters) {
         $lblCount.Text = "Showing $visibleCount result(s)"
     }
     else {
-        $lblCount.Text = "Showing $visibleCount of $totalCount result(s) (Details keyword filter)."
+        $lblCount.Text = "Showing $visibleCount of $totalCount result(s) (Column filters active)."
     }
 
     $btnExport.IsEnabled = ($visibleCount -gt 0)
     $btnCopy.IsEnabled = ($visibleCount -gt 0)
+}
+
+function Get-VisualChildTextBoxes {
+    param([Parameter(Mandatory = $true)][System.Windows.DependencyObject]$Root)
+
+    $children = @()
+    $count = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Root)
+    for ($i = 0; $i -lt $count; $i++) {
+        $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Root, $i)
+        if ($child -is [System.Windows.Controls.TextBox]) {
+            $children += $child
+        }
+
+        $children += @(Get-VisualChildTextBoxes -Root $child)
+    }
+
+    return $children
 }
 
 function Convert-DateFilterToApiDate {
@@ -846,6 +955,16 @@ Add-Type -AssemblyName System.Windows.Forms
             <Setter Property="BorderBrush" Value="#334155"/>
             <Setter Property="Padding" Value="6,4"/>
         </Style>
+        <Style x:Key="HeaderFilterTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Padding" Value="6,2"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="VerticalAlignment" Value="Top"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Background" Value="{StaticResource InputBg}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="#475569"/>
+        </Style>
         <Style TargetType="PasswordBox">
             <Setter Property="Background" Value="{StaticResource InputBg}"/>
             <Setter Property="Foreground" Value="White"/>
@@ -934,8 +1053,6 @@ Add-Type -AssemblyName System.Windows.Forms
                 <TextBlock Grid.Row="0" Grid.Column="3" Text="Before:" VerticalAlignment="Center" Margin="0,0,8,8"/>
                 <DatePicker Grid.Row="0" Grid.Column="4" x:Name="dpBefore" Margin="0,0,8,8"/>
                 <TextBox Grid.Row="0" Grid.Column="5" x:Name="txtBeforeTime" Height="24" Text="00:00" ToolTip="HH:mm" Margin="0,0,12,8"/>
-                <TextBlock Grid.Row="0" Grid.Column="6" Text="Device ID / Hostname (optional):" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                <TextBox Grid.Row="0" Grid.Column="7" x:Name="txtDeviceId" Height="24" Margin="0,0,12,8"/>
                 <TextBlock Grid.Row="0" Grid.Column="8" Text="Organization (optional):" VerticalAlignment="Center" Margin="0,0,8,8"/>
                 <ComboBox Grid.Row="0" Grid.Column="9" x:Name="cmbOrganization" Height="24" Margin="0,0,12,8"/>
 
@@ -951,8 +1068,6 @@ Add-Type -AssemblyName System.Windows.Forms
                             <Button x:Name="btnSelectAllTypes" Content="Select all" Height="24" Width="90" Margin="0,0,8,0"/>
                             <Button x:Name="btnDeselectAllTypes" Content="Deselect all" Height="24" Width="90"/>
                         </StackPanel>
-                        <TextBlock Text="Details keyword (optional)" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                        <TextBox x:Name="txtDetailsKeywordFilter" Height="24" Margin="0,0,0,8" ToolTip="Filter visible rows by keyword in the Details column"/>
                         <ListBox x:Name="lstTypes" SelectionMode="Multiple" Height="220" MinHeight="220"/>
                     </StackPanel>
 
@@ -977,17 +1092,123 @@ Add-Type -AssemblyName System.Windows.Forms
                     <Setter Property="Foreground" Value="#F8FAFC"/>
                     <Setter Property="BorderBrush" Value="#334155"/>
                     <Setter Property="FontWeight" Value="SemiBold"/>
+                    <Setter Property="VerticalContentAlignment" Value="Top"/>
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                    <Setter Property="Padding" Value="8,6,8,6"/>
                 </Style>
             </DataGrid.ColumnHeaderStyle>
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Activity ID" Binding="{Binding id}" Width="100"/>
-                <DataGridTextColumn Header="Activity Time" Binding="{Binding activityTime}" Width="170"/>
-                <DataGridTextColumn Header="Device ID" Binding="{Binding deviceId}" Width="100"/>
-                <DataGridTextColumn Header="Hostname" Binding="{Binding hostname}" Width="180"/>
-                <DataGridTextColumn Header="Type" Binding="{Binding activityType}" Width="180"/>
-                <DataGridTextColumn Header="Status" Binding="{Binding statusCode}" Width="160"/>
-                <DataGridTextColumn Header="Severity" Binding="{Binding severity}" Width="120"/>
-                <DataGridTemplateColumn Header="Details" Width="Auto" MinWidth="520">
+                <DataGridTextColumn Binding="{Binding id}" Width="100" MinWidth="80">
+                    <DataGridTextColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Activity ID" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterId" Tag="id" Text="" ToolTip="Filter by Activity ID" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTextColumn.HeaderTemplate>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding activityTime}" Width="170">
+                    <DataGridTextColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Activity Time" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterActivityTime" Tag="activityTime" Text="" ToolTip="Filter by Activity Time" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTextColumn.HeaderTemplate>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding deviceId}" Width="100" MinWidth="80">
+                    <DataGridTextColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Device ID" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterDeviceId" Tag="deviceId" Text="" ToolTip="Filter by Device ID" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTextColumn.HeaderTemplate>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding hostname}" Width="180">
+                    <DataGridTextColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Hostname" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterHostname" Tag="hostname" Text="" ToolTip="Filter by Hostname" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTextColumn.HeaderTemplate>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding activityType}" Width="180">
+                    <DataGridTextColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Type" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterActivityType" Tag="activityType" Text="" ToolTip="Filter by Type" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTextColumn.HeaderTemplate>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding statusCode}" Width="160">
+                    <DataGridTextColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Status" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterStatusCode" Tag="statusCode" Text="" ToolTip="Filter by Status" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTextColumn.HeaderTemplate>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding severity}" Width="120">
+                    <DataGridTextColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Severity" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterSeverity" Tag="severity" Text="" ToolTip="Filter by Severity" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTextColumn.HeaderTemplate>
+                </DataGridTextColumn>
+                <DataGridTemplateColumn Header="Details" Width="*" MinWidth="520">
+                    <DataGridTemplateColumn.HeaderTemplate>
+                        <DataTemplate>
+                            <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="24"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Details" Margin="0,0,0,4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="1" x:Name="txtFilterDetails" Tag="details" Text="" ToolTip="Filter by Details" HorizontalAlignment="Stretch" Style="{StaticResource HeaderFilterTextBoxStyle}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.HeaderTemplate>
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
                             <TextBlock Text="{Binding details}" ToolTip="{Binding details}" TextTrimming="CharacterEllipsis"/>
@@ -1017,8 +1238,6 @@ $dpAfter       = $window.FindName('dpAfter')
 $dpBefore      = $window.FindName('dpBefore')
 $txtAfterTime  = $window.FindName('txtAfterTime')
 $txtBeforeTime = $window.FindName('txtBeforeTime')
-$txtDeviceId   = $window.FindName('txtDeviceId')
-$txtDetailsKeywordFilter = $window.FindName('txtDetailsKeywordFilter')
 $cmbOrganization = $window.FindName('cmbOrganization')
 $btnSearch     = $window.FindName('btnSearch')
 $lstTypes      = $window.FindName('lstTypes')
@@ -1125,10 +1344,6 @@ $btnDeselectAllTypes.Add_Click({
     $lstTypes.UnselectAll()
 })
 
-$txtDetailsKeywordFilter.Add_TextChanged({
-    Apply-DetailsKeywordFilter -Keyword $txtDetailsKeywordFilter.Text
-})
-
 $btnSearch.Add_Click({
     $selectedTypes = @($lstTypes.SelectedItems)
 
@@ -1145,22 +1360,10 @@ $btnSearch.Add_Click({
         [System.Windows.MessageBox]::Show($_.Exception.Message, 'Invalid Time', 'OK', 'Warning') | Out-Null
         return
     }
-    $deviceFilter = $txtDeviceId.Text.Trim()
     $organizationId = [string]$cmbOrganization.SelectedValue
     if ([string]::IsNullOrWhiteSpace($script:ClientId) -or [string]::IsNullOrWhiteSpace($script:ClientSecret)) {
         [System.Windows.MessageBox]::Show('Credentials missing. Please reconnect first.', 'Not Connected', 'OK', 'Warning') | Out-Null
         return
-    }
-
-    $deviceId = $deviceFilter
-    if (-not [string]::IsNullOrWhiteSpace($deviceFilter) -and $deviceFilter -notmatch '^\d+$') {
-        $deviceId = Resolve-DeviceIdByHostname -Hostname $deviceFilter -ClientID $script:ClientId -ClientSecret $script:ClientSecret
-        if ([string]::IsNullOrWhiteSpace($deviceId)) {
-            [System.Windows.MessageBox]::Show("No device found for hostname '$deviceFilter'.", 'Device Not Found', 'OK', 'Warning') | Out-Null
-            return
-        }
-
-        Write-ConsoleLog -Level INFO -Message "Resolved hostname '$deviceFilter' to deviceId $deviceId"
     }
 
     $btnSearch.IsEnabled = $false
@@ -1168,22 +1371,21 @@ $btnSearch.Add_Click({
     $lblStatus.Text = 'Querying NinjaOne API...'
     $lblCount.Text = 'Loading...'
 
-    Write-ConsoleLog -Level INFO -Message "Search started. After=$afterDate Before=$beforeDate DeviceFilter=$deviceFilter ResolvedDeviceId=$deviceId OrganizationId=$organizationId Types=$($selectedTypes -join ',')"
+    Write-ConsoleLog -Level INFO -Message "Search started. After=$afterDate Before=$beforeDate OrganizationId=$organizationId Types=$($selectedTypes -join ',')"
     if ([string]::IsNullOrWhiteSpace($organizationId)) {
         Write-ConsoleLog -Level DEBUG -Message 'Organization filter: All organizations (none applied).'
-    }
-    elseif (-not [string]::IsNullOrWhiteSpace($deviceId)) {
-        Write-ConsoleLog -Level DEBUG -Message "Organization filter selected ($organizationId), but device-specific endpoint will be used when DeviceId is set."
     }
     else {
         Write-ConsoleLog -Level INFO -Message "Organization filter active: $organizationId"
     }
 
     try {
-        $results = Get-Activities -Types $selectedTypes -After $afterDate -Before $beforeDate -DeviceId $deviceId -OrganizationId $organizationId -ClientID $script:ClientId -ClientSecret $script:ClientSecret
+        $results = Get-Activities -Types $selectedTypes -After $afterDate -Before $beforeDate -DeviceId '' -OrganizationId $organizationId -ClientID $script:ClientId -ClientSecret $script:ClientSecret
         $script:AllResults = @($results)
+        $script:ProjectedRows = Convert-ActivitiesToProjectedRows -Activities $script:AllResults
         Write-ConsoleLog -Level DEBUG -Message "Date-filtered result count: $(@($script:AllResults).Count)"
-        Apply-DetailsKeywordFilter -Keyword $txtDetailsKeywordFilter.Text
+        Write-ConsoleLog -Level DEBUG -Message "Projected row cache count: $(@($script:ProjectedRows).Count)"
+        Apply-ColumnFilters -FilterMap (Get-ActiveColumnFilterMap)
 
         $count = $script:DataTable.Rows.Count
         $lblStatus.Text = "Search complete — $count visible activities returned."
@@ -1203,7 +1405,8 @@ $btnSearch.Add_Click({
 })
 
 $btnExport.Add_Click({
-    if (-not $script:AllResults -or @($script:AllResults).Count -eq 0) { return }
+    $visibleRows = @($dataGridView.ItemsSource)
+    if ($visibleRows.Count -eq 0) { return }
     if ([string]::IsNullOrWhiteSpace($script:ClientId) -or [string]::IsNullOrWhiteSpace($script:ClientSecret)) {
         [System.Windows.MessageBox]::Show('Credentials missing. Please reconnect before exporting.', 'Reconnect Required', 'OK', 'Warning') | Out-Null
         return
@@ -1215,17 +1418,21 @@ $btnExport.Add_Click({
 
     if ($dlg.ShowDialog() -eq 'OK') {
         try {
-            $script:AllResults | Select-Object @{N='Activity ID';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'id') }},
-                @{N='Activity Time';E={ ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $_ -PropertyName 'activityTime') }},
-                @{N='Device ID';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'deviceId') }},
-                @{N='Hostname';E={ Resolve-DeviceHostname -DeviceId (Get-ObjectPropertyValue -InputObject $_ -PropertyName 'deviceId') -ClientID $script:ClientId -ClientSecret $script:ClientSecret }},
-                @{N='Type';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'activityType') }},
-                @{N='Status';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'statusCode') }},
-                @{N='Severity';E={ [string](Get-ObjectPropertyValue -InputObject $_ -PropertyName 'severity') }},
-                @{N='Details';E={ Get-ActivityDetails -Activity $_ }} |
+            $visibleRows | ForEach-Object {
+                [pscustomobject]@{
+                    'Activity ID'   = [string]$_.Row.id
+                    'Activity Time' = [string]$_.Row.activityTime
+                    'Device ID'     = [string]$_.Row.deviceId
+                    'Hostname'      = [string]$_.Row.hostname
+                    'Type'          = [string]$_.Row.activityType
+                    'Status'        = [string]$_.Row.statusCode
+                    'Severity'      = [string]$_.Row.severity
+                    'Details'       = [string]$_.Row.details
+                }
+            } |
                 Export-Csv -Path $dlg.FileName -NoTypeInformation
 
-            $lblStatus.Text = "Exported $(@($script:AllResults).Count) rows to: $($dlg.FileName)"
+            $lblStatus.Text = "Exported $($visibleRows.Count) visible row(s) to: $($dlg.FileName)"
             Write-ConsoleLog -Level INFO -Message "Exported CSV to $($dlg.FileName)"
         }
         catch {
@@ -1265,6 +1472,23 @@ $btnCopy.Add_Click({
     [System.Windows.Clipboard]::SetText(($lines -join "`r`n"))
     $lblStatus.Text = "Copied $($selected.Count) row(s) to clipboard."
     Write-ConsoleLog -Level INFO -Message "Copied $($selected.Count) row(s) to clipboard"
+})
+
+$window.Add_ContentRendered({
+    if ($script:HeaderFilterTextBoxes.Count -gt 0) { return }
+
+    $filterableColumns = @('id','activityTime','deviceId','hostname','activityType','statusCode','severity','details')
+    $allTextBoxes = Get-VisualChildTextBoxes -Root $dataGridView
+    foreach ($textBox in $allTextBoxes) {
+        $tagName = [string]$textBox.Tag
+        if ([string]::IsNullOrWhiteSpace($tagName) -or $filterableColumns -notcontains $tagName) { continue }
+        if ($script:HeaderFilterTextBoxes.ContainsKey($tagName)) { continue }
+
+        $script:HeaderFilterTextBoxes[$tagName] = $textBox
+        $textBox.Add_TextChanged({
+            Apply-ColumnFilters -FilterMap (Get-ActiveColumnFilterMap)
+        })
+    }
 })
 #endregion
 
