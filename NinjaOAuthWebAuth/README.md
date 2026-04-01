@@ -114,9 +114,10 @@ powershell -ExecutionPolicy Bypass -File .\NinjaOne-ActivityFilter-GUI-WebAuth.p
 5. In GUI, set date/type filters.
 6. Optional: choose an organization in **Organization (optional)**.
 7. Optional: set a Device ID/Hostname filter (explicit device filter takes precedence over organization selection).
-8. Click **Search** (button is shown in the right panel of the filter card).
-9. If only organization is selected, the GUI resolves organization devices from `/v2/devices` (paged) and queries activities per matched device.
-10. Optional: **Export CSV** or **Copy Rows**.
+8. Optional: set **Details keyword (optional)** to live-filter visible rows by text in the `Details` column.
+9. Click **Search**.
+10. If only organization is selected, the GUI resolves organization devices from `/v2/devices` (paged) and queries activities per matched device.
+11. Optional: **Export CSV** or **Copy Rows**.
 
 ## OAuth flow (technical summary)
 

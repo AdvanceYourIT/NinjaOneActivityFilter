@@ -1,9 +1,6 @@
 # NinjaOne Activity Filter GUI
 
-Standalone PowerShell/WPF GUI to query NinjaOne activities, filter by date/type and optional device filter, and export/copy results.
-
-<img width="1206" height="753" alt="afbeelding" src="https://github.com/user-attachments/assets/d4240ce5-737a-4f9d-9c4b-199be1bb626f" />
-
+Standalone PowerShell/WPF GUI to query NinjaOne activities, filter by date/type/device/organization and optional **Details keyword**, and export/copy results.
 
 ## Use case
 If you manage a large environment (for example **18,196 devices**) and NinjaOne CSV export/filtering is currently practical only at day-level granularity, this GUI helps you narrow activity data down to **minute-level windows**.
@@ -17,6 +14,7 @@ That makes it easier to investigate spikes, incidents, or audit trails without m
   - multiple Activity Types
   - optional Device ID **or** Hostname
   - optional Organization
+  - optional Details keyword filter (client-side on the **Details** column)
 - Result grid columns:
   - Activity ID
   - Activity Time
@@ -50,8 +48,9 @@ That makes it easier to investigate spikes, incidents, or audit trails without m
 7. (Optional) Fill `Device ID / Hostname`.
    - If both are set, explicit Device ID/Hostname takes precedence.
    - If only Organization is set, the script resolves organization devices from `/v2/devices` (paged) and queries activity per matching device.
-8. Click **Search**.
-9. Use **Export CSV** or **Copy Rows** if needed.
+8. (Optional) Fill **Details keyword** to filter visible rows by text in the `Details` column (live filter; no extra API call).
+9. Click **Search**.
+10. Use **Export CSV** or **Copy Rows** if needed.
 
 ## Notes
 - Client ID and Secret are masked in the UI.

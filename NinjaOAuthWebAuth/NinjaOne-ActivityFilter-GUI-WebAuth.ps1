@@ -632,6 +632,50 @@ function Get-DateTimeFilterString {
     return $parsed.ToString('yyyy-MM-dd HH:mm')
 }
 
+function Apply-DetailsKeywordFilter {
+    param([AllowNull()][string]$Keyword)
+
+    $allResults = @(if ($null -eq $script:AllResults) { @() } else { $script:AllResults })
+    $needle = if ([string]::IsNullOrWhiteSpace($Keyword)) { '' } else { $Keyword.Trim().ToLowerInvariant() }
+    $visibleResults = if ([string]::IsNullOrWhiteSpace($needle)) {
+        $allResults
+    }
+    else {
+        foreach ($activity in $allResults) {
+            $details = Get-ActivityDetails -Activity $activity
+            if (-not [string]::IsNullOrWhiteSpace($details) -and $details.ToLowerInvariant().Contains($needle)) {
+                $activity
+            }
+        }
+    }
+
+    $script:DataTable.Rows.Clear()
+    foreach ($a in @($visibleResults)) {
+        $row = $script:DataTable.NewRow()
+        $row['id'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'id')
+        $row['activityTime'] = ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityTime')
+        $row['deviceId'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'deviceId')
+        $row['hostname'] = Resolve-DeviceHostname -DeviceId $row['deviceId'] -ClientID $script:ClientId -ClientSecret $script:ClientSecret
+        $row['activityType'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityType')
+        $row['statusCode'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'statusCode')
+        $row['severity'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'severity')
+        $row['details'] = Get-ActivityDetails -Activity $a
+        [void]$script:DataTable.Rows.Add($row)
+    }
+
+    $visibleCount = $script:DataTable.Rows.Count
+    $totalCount = $allResults.Count
+    if ([string]::IsNullOrWhiteSpace($needle)) {
+        $lblCount.Text = "Showing $visibleCount result(s)"
+    }
+    else {
+        $lblCount.Text = "Showing $visibleCount of $totalCount result(s) (Details keyword filter)."
+    }
+
+    $btnExport.IsEnabled = ($visibleCount -gt 0)
+    $btnCopy.IsEnabled = ($visibleCount -gt 0)
+}
+
 function Convert-DateFilterToApiDate {
     param(
         [AllowNull()][string]$Value,
@@ -1075,13 +1119,20 @@ Add-Type -AssemblyName System.Windows.Forms
                             <Button x:Name="btnSelectAllTypes" Content="Select all" Height="24" Width="90" Margin="0,0,8,0"/>
                             <Button x:Name="btnDeselectAllTypes" Content="Deselect all" Height="24" Width="90"/>
                         </StackPanel>
+                        <TextBlock Text="Details keyword (optional)" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                        <TextBox x:Name="txtDetailsKeywordFilter" Height="24" Margin="0,0,0,8" ToolTip="Filter visible rows by keyword in the Details column"/>
                         <ListBox x:Name="lstTypes" SelectionMode="Multiple" Height="220" MinHeight="220"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="1">
                         <Button x:Name="btnSearch" Content="Search" Height="28" Width="110" HorizontalAlignment="Left" IsEnabled="False" Margin="0,0,0,8"/>
-                        <TextBlock x:Name="lblCount" Text="No results" Foreground="{StaticResource TextMuted}" Margin="0,20,0,6"/>
-                        <TextBlock x:Name="lblStatus" Text="Ready. Click Login to authenticate with NinjaOne web OAuth." Foreground="{StaticResource TextPrimary}" TextWrapping="Wrap"/>
+                        <TextBlock Text="Result info" FontWeight="SemiBold" Margin="0,6,0,4"/>
+                        <Border Background="#0F172A" BorderBrush="#334155" BorderThickness="1" CornerRadius="6" Padding="8">
+                            <StackPanel>
+                                <TextBlock x:Name="lblCount" Text="No results" Foreground="{StaticResource TextMuted}" Margin="0,0,0,6"/>
+                                <TextBlock x:Name="lblStatus" Text="Ready. Click Login to authenticate with NinjaOne web OAuth." Foreground="{StaticResource TextPrimary}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </Grid>
             </Grid>
@@ -1133,6 +1184,7 @@ $dpBefore      = $window.FindName('dpBefore')
 $txtAfterTime  = $window.FindName('txtAfterTime')
 $txtBeforeTime = $window.FindName('txtBeforeTime')
 $txtDeviceId   = $window.FindName('txtDeviceId')
+$txtDetailsKeywordFilter = $window.FindName('txtDetailsKeywordFilter')
 $cmbOrganization = $window.FindName('cmbOrganization')
 $btnSearch     = $window.FindName('btnSearch')
 $lstTypes      = $window.FindName('lstTypes')
@@ -1296,6 +1348,10 @@ $btnDeselectAllTypes.Add_Click({
     $lstTypes.UnselectAll()
 })
 
+$txtDetailsKeywordFilter.Add_TextChanged({
+    Apply-DetailsKeywordFilter -Keyword $txtDetailsKeywordFilter.Text
+})
+
 $btnSearch.Add_Click({
     $selectedTypes = @($lstTypes.SelectedItems)
 
@@ -1349,28 +1405,11 @@ $btnSearch.Add_Click({
     try {
         $results = Get-Activities -Types $selectedTypes -After $afterDate -Before $beforeDate -DeviceId $deviceId -OrganizationId $organizationId -ClientID $script:ClientId -ClientSecret $script:ClientSecret
         $script:AllResults = @($results)
-        Write-ConsoleLog -Level DEBUG -Message "Date-filtered result count: $($script:AllResults.Count)"
+        Write-ConsoleLog -Level DEBUG -Message "Date-filtered result count: $(@($script:AllResults).Count)"
+        Apply-DetailsKeywordFilter -Keyword $txtDetailsKeywordFilter.Text
 
-        $script:DataTable.Rows.Clear()
-        foreach ($a in $script:AllResults) {
-            $row = $script:DataTable.NewRow()
-            $row['id'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'id')
-            $row['activityTime'] = ConvertFrom-EpochMs (Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityTime')
-            $row['deviceId'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'deviceId')
-            $row['hostname'] = Resolve-DeviceHostname -DeviceId $row['deviceId'] -ClientID $script:ClientId -ClientSecret $script:ClientSecret
-            $row['activityType'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'activityType')
-            $row['statusCode'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'statusCode')
-            $row['severity'] = [string](Get-ObjectPropertyValue -InputObject $a -PropertyName 'severity')
-            $row['details'] = Get-ActivityDetails -Activity $a
-            [void]$script:DataTable.Rows.Add($row)
-        }
-
-        $count = $script:AllResults.Count
-        $lblCount.Text = "Showing $count result(s)"
-        $lblStatus.Text = "Search complete - $count activities returned."
-
-        $btnExport.IsEnabled = ($count -gt 0)
-        $btnCopy.IsEnabled = ($count -gt 0)
+        $count = $script:DataTable.Rows.Count
+        $lblStatus.Text = "Search complete - $count visible activities returned."
 
         Write-ConsoleLog -Level INFO -Message "Search completed. Returned $count activities."
     }
@@ -1387,7 +1426,7 @@ $btnSearch.Add_Click({
 })
 
 $btnExport.Add_Click({
-    if (-not $script:AllResults -or $script:AllResults.Count -eq 0) { return }
+    if (-not $script:AllResults -or @($script:AllResults).Count -eq 0) { return }
     if ([string]::IsNullOrWhiteSpace($script:ClientId) -or [string]::IsNullOrWhiteSpace($script:ClientSecret)) {
         [System.Windows.MessageBox]::Show('Credentials missing. Please reconnect before exporting.', 'Reconnect Required', 'OK', 'Warning') | Out-Null
         return
@@ -1409,7 +1448,7 @@ $btnExport.Add_Click({
                 @{N='Details';E={ Get-ActivityDetails -Activity $_ }} |
                 Export-Csv -Path $dlg.FileName -NoTypeInformation
 
-            $lblStatus.Text = "Exported $($script:AllResults.Count) rows to: $($dlg.FileName)"
+            $lblStatus.Text = "Exported $(@($script:AllResults).Count) rows to: $($dlg.FileName)"
             Write-ConsoleLog -Level INFO -Message "Exported CSV to $($dlg.FileName)"
         }
         catch {
